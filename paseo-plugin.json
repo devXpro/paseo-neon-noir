@@ -1,0 +1,8 @@
+{
+  "id": "neon-noir",
+  "name": "Neon Noir",
+  "description": "A studio for dark themes: presets, knobs, fonts and effects",
+  "icon": "media/icon.png",
+  "media": ["media/hero.png", "media/studio.png", "media/phone.png", "media/preset-kowloon.png", "media/preset-brass-deco.png"],
+  "requirements": { "paseo": ">=0.13.0" }
+}
