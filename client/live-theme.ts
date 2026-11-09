@@ -2,7 +2,7 @@ import { settingsRpc } from "@getpaseo/plugin";
 import type { PluginCleanup } from "@getpaseo/plugin";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import type { output as ZodOutput } from "zod";
-import { resolveTheme, type ThemeColors } from "../shared/engine.ts";
+import { resolveStatus, resolveTheme, type StatusColors, type ThemeColors } from "../shared/engine.ts";
 import type { Preset } from "../shared/presets.ts";
 import { DEFAULT_PRESET_ID, editOf, presetById, studioSettings } from "../shared/settings.ts";
 
@@ -14,7 +14,11 @@ export type StudioValues = ZodOutput<typeof studioSettings.schema>;
  */
 export interface LiveTheme {
   /** Repaints the app with these colours, named after the preset. A no-op when they are painted already. */
-  update(colors: ThemeColors, preset: Preset): void;
+  update(colors: ThemeColors, preset: Preset, status: StatusColors): void;
+  /** What the theme object Paseo builds must carry beyond the eight colours addTheme accepts. */
+  overlay(): ThemeOverlay | null;
+  /** Registers the same theme again, once per set of colours, for a commit the overlay can ride on. */
+  repaintOnce(): void;
   /** The name of the preset painted now, for useSyncExternalStore. */
   presetName(): string;
   subscribe(listener: () => void): () => void;
@@ -30,15 +34,36 @@ export interface LiveTheme {
   dispose(): void;
 }
 
+/** Keys of Paseo's Theme.colors that its plugin theme contract does not let a theme set. */
+export type ThemeOverlay = Record<string, string>;
+
+const overlayOf = (status: StatusColors): ThemeOverlay => ({
+  statusSuccess: status.success,
+  statusWarning: status.warning,
+  statusDanger: status.danger,
+  statusSuccessTint: status.successTint,
+  statusWarningTint: status.warningTint,
+  statusDangerTint: status.dangerTint,
+  statusDotSuccess: status.successDot,
+  statusDotWarning: status.warningDot,
+  statusDotDanger: status.dangerDot,
+  statusDotRunning: status.runningDot,
+  statusMerged: status.merged,
+  destructive: status.destructive,
+});
+
 const THEME_ID = "live";
 /** How many painted colour pairs `isShowing` accepts: the app applies a repaint a frame or two late. */
 const RECENT = 32;
 
 export const themeName = (preset: Preset) => `Neon Noir · ${preset.name}`;
 
-const signatureOf = (colors: ThemeColors, name: string) =>
+const signatureOf = (colors: ThemeColors, name: string, status: StatusColors) =>
   [
     name,
+    status.success,
+    status.warning,
+    status.danger,
     colors.background,
     colors.foreground,
     colors.raised,
@@ -59,6 +84,9 @@ const pairOf = (surface0: string, accent: string) => `${surface0}|${accent}`.toL
 export function createLiveTheme(client: PluginClientContext): LiveTheme {
   let remove: PluginCleanup | null = null;
   let signature = "";
+  let overlay: ThemeOverlay | null = null;
+  let registered: Parameters<typeof client.addTheme>[0] | null = null;
+  let repainted = "";
   let presetName = "";
   const recent: string[] = [];
   const listeners = new Set<() => void>();
@@ -67,14 +95,17 @@ export function createLiveTheme(client: PluginClientContext): LiveTheme {
   let reads = 0;
   let disposed = false;
 
-  function update(colors: ThemeColors, preset: Preset) {
+  function update(colors: ThemeColors, preset: Preset, status: StatusColors) {
     const name = themeName(preset);
-    const next = signatureOf(colors, name);
+    const next = signatureOf(colors, name, status);
     if (disposed || next === signature) return;
+    // Before the registration: the commit it causes is the one the overlay must ride on.
+    overlay = overlayOf(status);
     // Removing first frees the id for the new registration. Both registry publishes land in this
     // one task and React renders them as one commit, so the default theme never shows in between.
     void remove?.();
-    remove = client.addTheme({ id: THEME_ID, name, appearance: "dark", colors });
+    registered = { id: THEME_ID, name, appearance: "dark", colors };
+    remove = client.addTheme(registered);
     signature = next;
     presetName = preset.name;
     recent.push(pairOf(colors.background, colors.accent));
@@ -96,11 +127,12 @@ export function createLiveTheme(client: PluginClientContext): LiveTheme {
     saved = parsed.data;
     if (holds > 0) return;
     const preset = presetById(saved.presetId);
-    update(resolveTheme(preset.id, editOf(saved.edits, preset.id)).colors, preset);
+    const resolved = resolveTheme(preset.id, editOf(saved.edits, preset.id));
+    update(resolved.colors, preset, resolveStatus(preset, resolved.knobs, resolved.colors));
   }
 
   const initial = resolveTheme(DEFAULT_PRESET_ID, null);
-  update(initial.colors, initial.preset);
+  update(initial.colors, initial.preset, resolveStatus(initial.preset, initial.knobs, initial.colors));
 
   const observation = client.paseo.observeEvents(["status.plugin_settings_changed"]);
   observation.subscribe({
@@ -122,6 +154,13 @@ export function createLiveTheme(client: PluginClientContext): LiveTheme {
 
   return {
     update,
+    overlay: () => overlay,
+    repaintOnce() {
+      if (disposed || registered === null || repainted === signature) return;
+      repainted = signature;
+      void remove?.();
+      remove = client.addTheme(registered);
+    },
     presetName: () => presetName,
     subscribe(listener) {
       listeners.add(listener);

@@ -129,6 +129,46 @@ on a device.
 
 `node tools/readme-table.ts fonts` prints this table from the registry in `shared/style.ts`.
 
+## Status colours
+
+Paseo fills in success, warning and danger by itself, the same for every plugin theme. Neon Noir
+draws them per preset, for its hue, its depth of black and its material, and they move with the
+knobs: inside their own hue bands, keeping their contrast and staying clear of the accent. Where the
+accent itself lies in the green band (Uranium, Phosphor, Hologram, Borealis), success is the accent.
+
+They reach Paseo's own interface and every plugin's `theme.colors.statusSuccess`, `statusWarning`
+and `statusDanger`, together with the badge fills, the sidebar dots, `statusMerged`, the running
+dot and `destructive`, on the Mac and on the phone. No public API allows this: the sidebar row
+recolours the theme object Paseo builds, just before Paseo applies it. If a Paseo update changes
+that, Paseo's stock colours show and nothing else breaks.
+
+| Preset         | Accent    | Success   | Warning   | Danger    |
+| -------------- | --------- | --------- | --------- | --------- |
+| Noir           | `#FE003F` | `#009A9A` | `#F1C36C` | `#F75B00` |
+| Monolith       | `#F0F2F4` | `#00E05B` | `#F9A724` | `#FF2F24` |
+| Graphite       | `#FA791D` | `#72D25C` | `#E2D14A` | `#F84950` |
+| Acid           | `#FFED00` | `#39C8C4` | `#EC881E` | `#FF274B` |
+| Hologram       | `#17FFE1` | `#17FFE1` | `#EABD5E` | `#F83D87` |
+| Ultraviolet    | `#9E5CFF` | `#5DE000` | `#F8AE00` | `#FF4370` |
+| Kowloon        | `#FF06D5` | `#2DE78B` | `#FFB346` | `#FF5542` |
+| Replicant      | `#FC8100` | `#5FAEAD` | `#DFD569` | `#E6385E` |
+| Reactor        | `#0095FE` | `#5EE2E3` | `#E6DD4E` | `#FF1F41` |
+| Uranium        | `#B4F100` | `#B4F100` | `#F8A139` | `#F4426C` |
+| Darkroom       | `#E65700` | `#479B5D` | `#DDA652` | `#E72C59` |
+| Phosphor       | `#12FF4C` | `#12FF4C` | `#F7B826` | `#FF4044` |
+| Amber          | `#F4AD00` | `#74BB3B` | `#D9791A` | `#EC1E3C` |
+| Grid           | `#00E3FE` | `#00DBC1` | `#F2CF3D` | `#FF3376` |
+| Brass Deco     | `#F7CE42` | `#3CAD9B` | `#DE9A57` | `#E73221` |
+| Lapis          | `#496AFF` | `#29AD62` | `#E3C152` | `#F5365C` |
+| Emerald Velvet | `#CCB142` | `#00C380` | `#DA883C` | `#F72058` |
+| Oxblood        | `#E4D8C2` | `#39A982` | `#D9B255` | `#FF4D30` |
+| Arctic         | `#2F98BF` | `#58D3D7` | `#FFA82A` | `#E2546F` |
+| Borealis       | `#32C8A0` | `#32C8A0` | `#D7D958` | `#ED3C7F` |
+
+Every knob setting holds these, and `npm run check` fuzzes 30,000 settings to prove it: 4.5:1 or
+more on the background and on cards, 3:1 for dots on the selected row, each colour in its own hue
+band, the three at least 12 apart (OKLab x100) and 7 from the accent unless locked to it.
+
 ## Knobs
 
 The studio's Adjust panel groups the knobs: **Accent** (Colour = Hue, Saturation = Neon, Brightness =
@@ -168,7 +208,8 @@ foreground and cursor from them; the ring doubles as scrollbars and the terminal
 and the label on an accent-filled button is painted in the background colour.
 
 Syntax highlighting is a separate setting in the same screen; Dracula and Tokyo Night sit well with
-these themes. Terminal ANSI colours, status, diff and destructive colours stay Paseo's.
+these themes. Terminal ANSI and diff colours stay Paseo's; status and destructive colours follow the preset (see
+Status colours).
 
 ## Develop
 

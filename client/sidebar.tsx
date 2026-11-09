@@ -4,6 +4,7 @@ import { useEffect, useRef, useSyncExternalStore, type ComponentType } from "rea
 import { Text, View } from "react-native";
 import type { LiveTheme } from "./live-theme.ts";
 import { STUDIO_SCREEN_ID } from "./screen.tsx";
+import { StatusOverlay } from "./status-overlay.tsx";
 import type { StyleRuntime } from "./style/runtime.ts";
 
 /**
@@ -17,18 +18,21 @@ export function createSidebarItem(live: LiveTheme, style: StyleRuntime): Compone
     const anchor = useRef<View>(null);
     useEffect(() => style.anchor(anchor.current), []);
     return (
-      <SidebarRow
-        icon="Palette"
-        active={currentScreen?.screenId === STUDIO_SCREEN_ID}
-        onPress={() => openScreen({ screenId: STUDIO_SCREEN_ID })}
-        trailing={
-          <View ref={anchor} collapsable={false}>
-            <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }} numberOfLines={1}>
-              {live.isShowing(theme.colors) ? presetName : "Off"}
-            </Text>
-          </View>
-        }
-      />
+      <>
+        <SidebarRow
+          icon="Palette"
+          active={currentScreen?.screenId === STUDIO_SCREEN_ID}
+          onPress={() => openScreen({ screenId: STUDIO_SCREEN_ID })}
+          trailing={
+            <View ref={anchor} collapsable={false}>
+              <Text style={{ fontSize: 12, color: theme.colors.foregroundMuted }} numberOfLines={1}>
+                {live.isShowing(theme.colors) ? presetName : "Off"}
+              </Text>
+            </View>
+          }
+        />
+        <StatusOverlay anchor={anchor} live={live} theme={theme} />
+      </>
     );
   };
 }

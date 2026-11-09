@@ -296,6 +296,11 @@ export function generate(input: Knobs): ThemeColors {
   return { background, foreground, raised, control, border, accent, mutedForeground, ring };
 }
 
+/** The status colours of a resolved theme. Separate from resolveTheme: only painting the app needs them. */
+export function resolveStatus(preset: Preset, knobs: Knobs, colors: ThemeColors): StatusColors {
+  return statusColors(knobs, preset, colors);
+}
+
 /** A preset with the saved knobs applied. An unknown id falls back to the default preset. */
 export function resolveTheme(
   presetId: string,
@@ -370,4 +375,324 @@ export function fit(t: ThemeColors): Knobs {
 export function deltaE(a: Hex, b: Hex): number {
   const x = hexToOklab(a), y = hexToOklab(b);
   return Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]) * 100;
+}
+
+// ---------- status colours ----------
+// Paseo's success, warning and danger: drawn per preset (Preset.status) at its own knobs, then
+// carried by the knobs inside semantic hue bands, so an edited preset still reads and still fits.
+
+export type StatusRole = "success" | "warning" | "danger";
+export const STATUS_ROLES: StatusRole[] = ["success", "warning", "danger"];
+
+/** A status colour as the preset's designer drew it, at the preset's own knobs. */
+export interface StatusVoice {
+  /** OKLCH hue, inside the role's band. */
+  h: number;
+  /** Chroma as a share of the sRGB gamut at (L, h), 0..1. */
+  share: number;
+  /** OKLCH lightness. */
+  L: number;
+}
+
+/** A preset's three status colours. "accent": success IS the accent while it sits in the success band. */
+export interface StatusSpec {
+  success: StatusVoice | "accent";
+  warning: StatusVoice;
+  danger: StatusVoice;
+}
+
+export interface StatusColors {
+  success: Hex;
+  warning: Hex;
+  danger: Hex;
+  /** Badge fills: the status at 16%, as Paseo builds them. */
+  successTint: string;
+  warningTint: string;
+  dangerTint: string;
+  /** Sidebar dots: same hue, louder chroma, as Paseo's dot band. */
+  successDot: Hex;
+  warningDot: Hex;
+  dangerDot: Hex;
+  /** The working dot: the accent when it is blue enough to say "busy", else a blue of the same family. */
+  runningDot: Hex;
+  /** Merged pull requests: Paseo's violet in the family's lightness and chroma. */
+  merged: Hex;
+  /** Delete actions and the stop button, whose icon is white: the danger, deep enough to carry it. */
+  destructive: Hex;
+}
+
+/** Semantic hue bands (OKLCH): centre and half-width. A role never leaves its band. */
+export const STATUS_BAND: Record<StatusRole, { c: number; half: number }> = {
+  danger: { c: 12, half: 30 }, // 342..42 crimson to vermilion
+  warning: { c: 85, half: 27 }, // 58..112 orange to yellow
+  success: { c: 161, half: 39 }, // 122..200 lime to teal
+};
+
+export const STATUS_LIMITS = {
+  /** Readable as 12pt text on the background and on cards. */
+  textMin: 4.5,
+  /** A sidebar dot on the selected row. */
+  dotMin: 3,
+  /** Hue gaps that keep the three states apart. */
+  gapWarningDanger: 28,
+  gapSuccessWarning: 38,
+  /** OKLab x100. Paseo's own amber and red are 7.3 apart: the bar is above stock. */
+  pairMin: 12,
+  /** Against the accent, unless locked to it. */
+  accentMin: 7,
+  /** Below this a status is grey, and grey says nothing. */
+  chromaMin: 0.07,
+  /** The stop button's white icon on the destructive fill. */
+  destructiveOnWhite: 3.5,
+  /** The destructive colour as text and as a fill on the background. */
+  destructiveOnBg: 3,
+};
+
+const DRIFT: Record<StatusRole, number> = { success: 24, warning: 8, danger: 8 };
+const ACCENT_HUE_GAP = 20;
+const MERGED_HUE = 300;
+const RUNNING_HUE = 250;
+/** A status keeps at least this chroma when the gamut allows: below it, it stops saying anything. */
+const CHROMA_FLOOR = 0.078;
+const TINT_ALPHA = "29";
+
+const smooth = (t: number) => {
+  const x = clamp(t, 0, 1);
+  return x * x * (3 - 2 * x);
+};
+
+export const hueGap = (a: number, b: number) => Math.abs(wrap180(a - b));
+
+export function inBand(role: StatusRole, h: number, slack = 0): boolean {
+  return Math.abs(wrap180(h - STATUS_BAND[role].c)) <= STATUS_BAND[role].half + slack;
+}
+
+function clampBand(role: StatusRole, h: number): number {
+  const { c, half } = STATUS_BAND[role];
+  return mod360(c + clamp(wrap180(h - c), -half, half));
+}
+
+/** Inside the success band a hue maps to itself; outside it glides back across, so no jump anywhere. */
+function foldSuccess(h: number): number {
+  const lo = STATUS_BAND.success.c - STATUS_BAND.success.half;
+  const hi = STATUS_BAND.success.c + STATUS_BAND.success.half;
+  if (h >= lo && h <= hi) return h;
+  return lerp(hi, lo, mod360(h - hi) / (360 - (hi - lo)));
+}
+
+/** The nearest hue in [lo, hi] (signed degrees) at least `gap` from `avoid`. */
+function awayFrom(h: number, avoid: number, gap: number, lo: number, hi: number): number {
+  const d = wrap180(h - avoid);
+  if (Math.abs(d) >= gap) return h;
+  const up = avoid + gap;
+  const down = avoid - gap;
+  const upOk = up <= hi && up >= lo;
+  const downOk = down >= lo && down <= hi;
+  if (upOk && downOk) return d >= 0 ? up : down;
+  if (upOk) return up;
+  if (downOk) return down;
+  return h;
+}
+
+function chromaAt(l: number, share: number, h: number): number {
+  const top = maxChroma(l, h);
+  return Math.max(share * top, Math.min(CHROMA_FLOOR, top));
+}
+
+const paint = (l: number, share: number, h: number): Hex => oklchToHex(l, chromaAt(l, share, h), h);
+
+function reads(hex: Hex, theme: ThemeColors, min: number): boolean {
+  return contrastRatio(hex, theme.raised) >= min && contrastRatio(hex, theme.background) >= min;
+}
+
+function readable(L: number, share: number, h: number, theme: ThemeColors, min: number): Hex {
+  let l = L;
+  let hex = paint(l, share, h);
+  while (l < 0.97 && !reads(hex, theme, min)) {
+    l += 0.004;
+    hex = paint(l, share, h);
+  }
+  // A status the accent could be mistaken for moves in lightness once hue has nowhere left to go:
+  // away from the accent's own lightness, down only while it still reads.
+  const aL = hexToOklch(theme.accent)[0];
+  const tooClose = (x: Hex) => deltaE(x, theme.accent) < STATUS_LIMITS.accentMin + 0.5;
+  if (!tooClose(hex)) return hex;
+  const search = (direction: number): Hex | null => {
+    let walk = l;
+    for (let i = 0; i < 36; i++) {
+      walk += direction * 0.008;
+      if ((direction > 0 && walk > 0.88) || walk < 0.5) return null;
+      const candidate = paint(walk, share, h);
+      if (!reads(candidate, theme, min)) return null;
+      if (!tooClose(candidate)) return candidate;
+    }
+    return null;
+  };
+  // First away from the accent's own lightness, then the other way if the surfaces forbid it.
+  return search(l < aL ? -1 : 1) ?? search(l < aL ? 1 : -1) ?? hex;
+}
+
+export function statusColors(knobs: Knobs, preset: Preset, theme: ThemeColors): StatusColors {
+  const spec = preset.status;
+  const k = normalizeKnobs(knobs);
+  const own = normalizeKnobs(preset.knobs);
+  const drift = Math.sin((wrap180(k.hue - own.hue) * Math.PI) / 180);
+  const dNeon = k.neon - own.neon;
+  const dGlow = k.glow - own.glow;
+  const dContrast = k.contrast - own.contrast;
+  const [aL, aC, aH] = hexToOklch(theme.accent);
+  const accentHasHue = aC >= 0.06;
+  // A pale accent can be avoided, but it cannot stand in for a status: it says nothing.
+  const accentCanSpeak = aC >= 0.085 && aL <= 0.92;
+
+  const move = (v: StatusVoice, role: StatusRole) => ({
+    h: clampBand(role, v.h + DRIFT[role] * drift),
+    share: clamp(v.share + 0.25 * dNeon, 0.5, 1),
+    L: clamp(v.L + 0.07 * dGlow + 0.03 * dContrast, 0.6, 0.9),
+  });
+
+  // Success: the accent itself, or its own voice melting into the accent as they approach.
+  let success: Hex;
+  let successH: number;
+  const accentShare = aC / Math.max(1e-6, maxChroma(aL, aH));
+  const accentReads =
+    contrastRatio(theme.accent, theme.raised) >= STATUS_LIMITS.textMin &&
+    contrastRatio(theme.accent, theme.background) >= STATUS_LIMITS.textMin;
+  // The accent as a status, lifted only when it would not read on a card. Exact when it does.
+  const accentAsSuccess = (): Hex => {
+    if (accentReads) return theme.accent;
+    let l = aL;
+    let hex = theme.accent;
+    while (l < 0.97 && (contrastRatio(hex, theme.raised) < STATUS_LIMITS.textMin || contrastRatio(hex, theme.background) < STATUS_LIMITS.textMin)) {
+      l += 0.004;
+      hex = oklchToHex(l, accentShare * maxChroma(l, aH), aH);
+    }
+    return hex;
+  };
+  if (spec.success === "accent" && accentCanSpeak) {
+    successH = foldSuccess(aH);
+    success = inBand("success", aH)
+      ? accentAsSuccess()
+      : readable(Math.min(aL, 0.82), Math.max(accentShare, 0.5), successH, theme, STATUS_LIMITS.textMin);
+  } else {
+    const fallback: StatusVoice = spec.success === "accent" ? { h: 150, share: 0.6, L: 0.74 } : spec.success;
+    const v = move(fallback, "success");
+    const near = accentCanSpeak && inBand("success", aH) ? smooth((30 - hueGap(v.h, aH)) / 16) : 0;
+    successH = near >= 1 ? aH : mod360(v.h + wrap180(aH - v.h) * near);
+    success =
+      near >= 1
+        ? accentAsSuccess()
+        : readable(lerp(v.L, aL, near), lerp(v.share, accentShare, near), successH, theme, STATUS_LIMITS.textMin);
+  }
+
+  // Danger keeps away from the accent, within its band.
+  const dv = move(spec.danger, "danger");
+  let dangerSigned = wrap180(dv.h);
+  if (accentHasHue) dangerSigned = awayFrom(dangerSigned, wrap180(aH), ACCENT_HUE_GAP, -18, 42);
+
+  // Warning lives between danger and success, and keeps away from the accent too.
+  const wv = move(spec.warning, "warning");
+  const lo = Math.max(58, dangerSigned + STATUS_LIMITS.gapWarningDanger);
+  const hi = Math.min(112, (successH > 180 ? 200 : successH) - STATUS_LIMITS.gapSuccessWarning);
+  let warningH = clamp(wv.h, lo, Math.max(lo, hi));
+  if (accentHasHue) warningH = awayFrom(warningH, aH, ACCENT_HUE_GAP, lo, Math.max(lo, hi));
+
+  const dangerH = mod360(dangerSigned);
+  const danger = readable(dv.L, dv.share, dangerH, theme, STATUS_LIMITS.textMin);
+  let warning = readable(wv.L, wv.share, warningH, theme, STATUS_LIMITS.textMin);
+  // Amber has the room to move. Outward from the drawn lightness, nearest first, leaning away
+  // from the closer neighbour and richer the further it goes, until it clears both.
+  const crowded = (x: Hex) =>
+    deltaE(x, danger) < STATUS_LIMITS.pairMin + 0.3 || deltaE(x, success) < STATUS_LIMITS.pairMin + 0.3;
+  if (crowded(warning)) {
+    const drawnL = hexToOklch(warning)[0];
+    const lean = deltaE(warning, success) < deltaE(warning, danger) ? -0.5 : 0.5;
+    search: for (let step = 1; step <= 40; step++) {
+      for (const sign of [1, -1]) {
+        const h = clamp(warningH + lean * step, lo, Math.max(lo, hi));
+        const candidate = readable(
+          clamp(drawnL + sign * step * 0.006, 0.6, 0.86),
+          Math.min(1, wv.share + step * 0.02),
+          h,
+          theme,
+          STATUS_LIMITS.textMin,
+        );
+        if (!crowded(candidate)) {
+          warning = candidate;
+          warningH = h;
+          break search;
+        }
+      }
+    }
+  }
+
+  const dot = (hex: Hex, h: number): Hex => {
+    const [L, C] = hexToOklch(hex);
+    const share = C / Math.max(1e-6, maxChroma(L, h));
+    return oklchToHex(L, Math.max(share, Math.min(0.95, share + 0.25)) * maxChroma(L, h), h);
+  };
+
+  const family = [success, warning, danger].map(hexToOklch);
+  const meanL = family.reduce((sum, [L]) => sum + L, 0) / 3;
+  const meanShare = family.reduce((sum, [L, C, h]) => sum + C / Math.max(1e-6, maxChroma(L, h)), 0) / 3;
+  const merged = readable(meanL, meanShare, MERGED_HUE, theme, STATUS_LIMITS.textMin);
+  const accentIsBlue = accentCanSpeak && aH >= 215 && aH <= 300;
+  const runningDot = accentIsBlue
+    ? dot(theme.accent, aH)
+    : dot(readable(meanL, meanShare, RUNNING_HUE, theme, STATUS_LIMITS.textMin), RUNNING_HUE);
+
+  const [dangerL, dangerC] = hexToOklch(danger);
+  let destructive = danger;
+  for (let l = dangerL; l > 0.45 && contrastRatio(destructive, "#FFFFFF") < STATUS_LIMITS.destructiveOnWhite + 0.1; l -= 0.004)
+    destructive = oklchToHex(l, dangerC, dangerH);
+
+  return {
+    success,
+    warning,
+    danger,
+    successTint: success + TINT_ALPHA,
+    warningTint: warning + TINT_ALPHA,
+    dangerTint: danger + TINT_ALPHA,
+    successDot: dot(success, successH),
+    warningDot: dot(warning, warningH),
+    dangerDot: dot(danger, dangerH),
+    runningDot,
+    merged,
+    destructive,
+  };
+}
+
+export function statusViolations(s: StatusColors, theme: ThemeColors): string[] {
+  const out: string[] = [];
+  const roles: Array<[StatusRole, Hex, Hex]> = [
+    ["success", s.success, s.successDot],
+    ["warning", s.warning, s.warningDot],
+    ["danger", s.danger, s.dangerDot],
+  ];
+  for (const [role, hex, dot] of roles) {
+    const [, C, h] = hexToOklch(hex);
+    if (contrastRatio(hex, theme.background) < STATUS_LIMITS.textMin - 0.02) out.push(`${role}:bg`);
+    if (contrastRatio(hex, theme.raised) < STATUS_LIMITS.textMin - 0.02) out.push(`${role}:raised`);
+    if (contrastRatio(dot, theme.control) < STATUS_LIMITS.dotMin) out.push(`${role}:dot`);
+    if (!inBand(role, h, 1.5)) out.push(`${role}:band(${h.toFixed(0)})`);
+    if (C < STATUS_LIMITS.chromaMin) out.push(`${role}:grey(${C.toFixed(3)})`);
+  }
+  const hOf = (x: Hex) => hexToOklch(x)[2];
+  if (hueGap(hOf(s.warning), hOf(s.danger)) < STATUS_LIMITS.gapWarningDanger - 2) out.push("gap:warning-danger");
+  if (hueGap(hOf(s.success), hOf(s.warning)) < STATUS_LIMITS.gapSuccessWarning - 2) out.push("gap:success-warning");
+  if (deltaE(s.success, s.warning) < STATUS_LIMITS.pairMin) out.push("pair:success-warning");
+  if (deltaE(s.warning, s.danger) < STATUS_LIMITS.pairMin) out.push("pair:warning-danger");
+  if (deltaE(s.success, s.danger) < STATUS_LIMITS.pairMin) out.push("pair:success-danger");
+  const [, aC] = hexToOklch(theme.accent);
+  if (aC >= 0.06) {
+    if (deltaE(s.warning, theme.accent) < STATUS_LIMITS.accentMin) out.push("accent:warning");
+    if (deltaE(s.danger, theme.accent) < STATUS_LIMITS.accentMin) out.push("accent:danger");
+    const melted = hueGap(hexToOklch(s.success)[2], hexToOklch(theme.accent)[2]) < 14;
+    if (!melted && deltaE(s.success, theme.accent) < STATUS_LIMITS.accentMin) out.push("accent:success");
+  }
+  if (contrastRatio(s.runningDot, theme.control) < STATUS_LIMITS.dotMin) out.push("running:dot");
+  if (contrastRatio(s.merged, theme.raised) < STATUS_LIMITS.textMin - 0.02) out.push("merged:raised");
+  if (contrastRatio(s.destructive, "#FFFFFF") < STATUS_LIMITS.destructiveOnWhite) out.push("destructive:white");
+  if (contrastRatio(s.destructive, theme.background) < STATUS_LIMITS.destructiveOnBg) out.push("destructive:bg");
+  return out;
 }

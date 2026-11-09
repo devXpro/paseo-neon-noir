@@ -1,7 +1,8 @@
 // Run: node tools/readme-table.ts. Prints README.md's preset table from the presets as they are;
-// `node tools/readme-table.ts fonts` prints its font table from the registry.
+// `node tools/readme-table.ts fonts` prints its font table from the registry, and
+// `node tools/readme-table.ts status` its table of status colours.
 
-import { resolveTheme } from "../shared/engine.ts";
+import { resolveStatus, resolveTheme } from "../shared/engine.ts";
 import { PRESETS } from "../shared/presets.ts";
 import { FONTS, fontById } from "../shared/style.ts";
 
@@ -39,7 +40,18 @@ function fontRows(): string[][] {
   return rows;
 }
 
-const rows = process.argv[2] === "fonts" ? fontRows() : presetRows();
+function statusRows(): string[][] {
+  const rows = [["Preset", "Accent", "Success", "Warning", "Danger"]];
+  for (const p of PRESETS) {
+    const { knobs, colors } = resolveTheme(p.id, null);
+    const s = resolveStatus(p, knobs, colors);
+    rows.push([p.name, `\`${colors.accent}\``, `\`${s.success}\``, `\`${s.warning}\``, `\`${s.danger}\``]);
+  }
+  return rows;
+}
+
+const mode = process.argv[2];
+const rows = mode === "fonts" ? fontRows() : mode === "status" ? statusRows() : presetRows();
 const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
 const line = (r: string[]) => `| ${r.map((c, i) => c.padEnd(widths[i])).join(" | ")} |`;
 console.log([line(rows[0]), line(widths.map((w) => "-".repeat(w))), ...rows.slice(1).map(line)].join("\n"));

@@ -1,9 +1,11 @@
 // Run: node tools/check.ts (or npm run check). Prints the contrast table of every preset, the
-// closest accents and chat views with the design review's warnings, fuzzes generate() over the
-// whole knob space, and exits 1 on any guarantee violation. Warnings never fail the run.
+// closest accents and chat views with the design review's warnings, each preset's status colours,
+// fuzzes generate() and the status colours over the whole knob space, and exits 1 on any guarantee
+// violation. Warnings never fail the run.
 
 import {
-  LIMITS, deltaE, fit, generate, hexToOklch, metrics, normalizeKnobs, resolveTheme, violations, type ThemeColors,
+  LIMITS, contrastRatio, deltaE, fit, generate, hexToOklch, metrics, normalizeKnobs, resolveStatus, resolveTheme,
+  statusColors, statusViolations, violations, type StatusColors, type ThemeColors,
 } from "../shared/engine.ts";
 import { PRESETS } from "../shared/presets.ts";
 import { DEFAULT_PRESET_ID, KNOBS, knobsSchema, type Knobs } from "../shared/settings.ts";
@@ -162,5 +164,65 @@ for (const b of bad) console.log("  e.g.", JSON.stringify(b.k), b.v.join(","), J
 
 const fuzzFails = Object.values(fails).reduce((a, b) => a + b, 0);
 if (fuzzFails) problems.push(`fuzz: ${fuzzFails} violations`);
+
+// ---- status colours ----
+console.log("\n== Status colours (ratios on background / card, distance from accent) ==");
+const triples: { id: string; s: StatusColors }[] = [];
+for (const p of PRESETS) {
+  const { knobs, colors: t } = resolveTheme(p.id, null);
+  const s = resolveStatus(p, knobs, t);
+  triples.push({ id: p.id, s });
+  const v = statusViolations(s, t);
+  if (v.length) problems.push(`${p.id} status: ${v.join(",")}`);
+  const cell = (hex: string) =>
+    `${hex} ${f(contrastRatio(hex, t.background), 1)}/${f(contrastRatio(hex, t.raised), 1)} d${f(deltaE(hex, t.accent), 1)}`;
+  console.log(pad(p.name, 16) + [cell(s.success), cell(s.warning), cell(s.danger)].map((c) => pad(c, 28)).join("") + (v.length ? v.join(",") : "ok"));
+}
+// One formula on many backgrounds is the failure this report exists to catch.
+const tripleGaps: [number, string][] = [];
+for (let i = 0; i < triples.length; i++)
+  for (let j = i + 1; j < triples.length; j++) {
+    const a = triples[i], b = triples[j];
+    const d = (deltaE(a.s.success, b.s.success) + deltaE(a.s.warning, b.s.warning) + deltaE(a.s.danger, b.s.danger)) / 3;
+    tripleGaps.push([d, `${a.id} / ${b.id}`]);
+  }
+console.log("\n== Closest status triples (mean of the three distances) ==");
+for (const [d, n] of tripleGaps.sort((x, y) => x[0] - y[0]).slice(0, 8)) console.log(f(d, 1).padStart(5), n);
+
+const statusRand = rng(20261109);
+const statusPick = <T,>(a: T[]) => a[Math.floor(statusRand() * a.length)];
+function knobsNear(base: Knobs): Knobs {
+  const toEdge = statusRand() < 0.5;
+  const unit = () => (toEdge ? statusPick([0, 0.5, 1]) : statusRand());
+  const angle = () => (toEdge ? statusPick([-180, -90, 0, 90, 180]) : -180 + statusRand() * 360);
+  const keep = () => statusRand() < 0.25;
+  return {
+    hue: keep() ? base.hue : statusRand() * 360,
+    neon: keep() ? base.neon : unit(),
+    glow: keep() ? base.glow : unit(),
+    depth: keep() ? base.depth : unit(),
+    tint: keep() ? base.tint : unit(),
+    contrast: keep() ? base.contrast : unit(),
+    ring: statusRand() < 0.3 ? null : angle(),
+    field: keep() ? base.field : angle(),
+  };
+}
+const statusFails: Record<string, number> = {};
+let statusRuns = 0;
+for (const p of PRESETS) {
+  for (let i = 0; i < 1500; i++) {
+    const k = knobsNear(p.knobs);
+    const t = generate(k);
+    statusRuns++;
+    for (const x of statusViolations(statusColors(k, p, t), t)) {
+      const key = x.replace(/\(.*\)/, "");
+      statusFails[key] = (statusFails[key] ?? 0) + 1;
+    }
+  }
+}
+console.log(`\n== Status fuzz: ${statusRuns} knob sets ==`);
+console.log("fails  :", JSON.stringify(statusFails));
+const statusFuzzFails = Object.values(statusFails).reduce((a, b) => a + b, 0);
+if (statusFuzzFails) problems.push(`status fuzz: ${statusFuzzFails} violations`);
 console.log(problems.length ? `\nFAIL\n- ${problems.join("\n- ")}` : "\nRESULT: ok");
 process.exit(problems.length ? 1 : 0);

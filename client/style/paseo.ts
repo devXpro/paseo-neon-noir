@@ -41,7 +41,7 @@ interface NativeAsyncStorage {
   multiSet(pairs: [string, string][], callback: (errors?: unknown) => void): void;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 const failed = (errors: unknown) => (Array.isArray(errors) ? errors.length > 0 : Boolean(errors));
@@ -132,15 +132,16 @@ interface QueryClientLike {
   getQueryData(key: readonly unknown[]): unknown;
   setQueryData(key: readonly unknown[], data: unknown): unknown;
 }
-interface FiberLike {
+export interface FiberLike {
   return: FiberLike | null;
   memoizedProps?: { value?: unknown } | null;
+  type?: unknown;
 }
 
 const isFiber = (value: unknown): value is FiberLike => isRecord(value) && "return" in value && "memoizedProps" in value;
 
 /** The fiber behind a host node: a DOM element on the web, a Fabric instance on the phone. */
-function fiberOf(node: unknown): FiberLike | null {
+export function fiberOf(node: unknown): FiberLike | null {
   if (!isRecord(node)) return null;
   const handle = node.__internalInstanceHandle;
   if (isFiber(handle)) return handle;

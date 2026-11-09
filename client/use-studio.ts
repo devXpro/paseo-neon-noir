@@ -1,6 +1,6 @@
 import { useSettings, type SettingsState } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
-import { resolveTheme } from "../shared/engine.ts";
+import { resolveStatus, resolveTheme } from "../shared/engine.ts";
 import type { Preset } from "../shared/presets.ts";
 import { KNOBS, editOf, presetById, studioSettings, type Knobs } from "../shared/settings.ts";
 import type { LiveTheme, StudioValues } from "./live-theme.ts";
@@ -105,7 +105,7 @@ export function useStudio(live: LiveTheme) {
     session.current = next;
     setShown(next);
     // A no-op when these colours are painted already.
-    if (paint) live.update(next.resolved.colors, next.resolved.preset);
+    if (paint) live.update(next.resolved.colors, next.resolved.preset, resolveStatus(next.resolved.preset, next.resolved.knobs, next.resolved.colors));
   }
 
   function flush() {
