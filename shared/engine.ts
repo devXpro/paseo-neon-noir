@@ -7,8 +7,14 @@ import { DEFAULT_PRESET_ID, type Knobs } from "./settings.ts";
 
 export type Hex = string; // "#RRGGBB", upper case
 
-/** The eight colours of a Paseo theme, accent included. Neon Noir themes are always dark. */
+/** The eight colours of a Paseo theme, accent included. */
 export type ThemeColors = Required<PluginThemeColors>;
+
+/**
+ * Dark: the field is black and every colour is solved lighter than it. Light: the same knobs on
+ * a white field, every colour solved darker. One preset, two looks; the guarantees hold in both.
+ */
+export type Mode = "dark" | "light";
 
 /** Hard guarantees (inclusive), WCAG ratios against the background. tools/check.ts fuzzes them. */
 export const LIMITS = {
@@ -31,6 +37,11 @@ export const LIMITS = {
  * Depth is perceptual, L = DEPTH_L * sqrt(depth), so the lower half of the knob is not all #000.
  */
 const DEPTH_L = 0.26;
+/**
+ * Light background OKLab L at depth 1, as 1 - LIGHT_DEPTH_L: about #E1E1E1 when untinted, the
+ * darkest paper that keeps dark text at 15:1. Depth 0 is pure white, the mirror of pure black.
+ */
+const LIGHT_DEPTH_L = 0.09;
 /**
  * Ring chroma as a share of the sRGB gamut at its lightness and hue, so violet, magenta and red
  * rings are as lively as cyan ones, whatever the tint. Teal and green rings (hues 140-230) have
@@ -59,6 +70,9 @@ const NEON_FLOOR = 0.18;
 const MUTED_L = 0.7;
 /** Accent lightness at glow 1: near-white at the accent's hue. */
 const WHITE_L = 0.96;
+/** The light mirrors: a mid accent that reads as ink, bronze or sage on paper, and near-black at glow 1. */
+const LIGHT_MUTED_L = 0.5;
+const LIGHT_DEEP_L = 0.25;
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -179,18 +193,23 @@ export function contrastRatio(a: Hex, b: Hex): number {
 // ---------- generator ----------
 
 /**
- * Lightest-needed solve: colour of hue h just light enough to reach `target` against bg. Chroma
- * is fixed, or a function of the lightness being tried.
+ * Nearest-needed solve: colour of hue h just far enough from bg to reach `target`: lighter on a
+ * dark field, darker on a light one. Chroma is fixed, or a function of the lightness being tried.
  */
-function solveRatio(bg: Hex, c: number | ((L: number) => number), h: number, target: number): Hex {
+function solveRatio(bg: Hex, c: number | ((L: number) => number), h: number, target: number, mode: Mode = "dark"): Hex {
   const at = (L: number) => oklchToHex(L, typeof c === "number" ? c : c(L), h);
-  let lo = hexToOklch(bg)[0], hi = 1;
-  let best = at(1);
+  const bgL = hexToOklch(bg)[0];
+  const dark = mode === "dark";
+  let best = at(dark ? 1 : 0);
   if (contrastRatio(best, bg) < target) return best; // unreachable; caller's check will flag it
+  let lo = dark ? bgL : 0, hi = dark ? 1 : bgL;
   for (let i = 0; i < 30; i++) {
     const mid = (lo + hi) / 2;
     const hex = at(mid);
-    if (contrastRatio(hex, bg) >= target) { best = hex; hi = mid; } else lo = mid;
+    const reads = contrastRatio(hex, bg) >= target;
+    if (reads) best = hex;
+    // Toward the background while it still reads, away from it when it stops.
+    if (reads === dark) hi = mid; else lo = mid;
   }
   return best;
 }
@@ -212,36 +231,49 @@ function cuspL(h: number): number {
 const ACCENT_TARGET = LIMITS.onAccentMin + 0.05;
 
 interface AccentBand {
-  /** Glow 0: the deepest lightness that still reaches ACCENT_TARGET. */
+  /** Glow 0: the lightness nearest the background that still reaches ACCENT_TARGET. */
   low: number;
   /** Glow 0.5. */
   mid: number;
-  /** Glow 1: near-white. */
+  /** Glow 1: near-white on a dark field, near-black on a light one. */
   high: number;
   /** The accent at lightness L: hue kept, chroma a fixed share of the gamut there. */
   at: (L: number) => Hex;
 }
 
-function accentBand(hue: number, neon: number, background: Hex): AccentBand {
+function accentBand(hue: number, neon: number, background: Hex, mode: Mode): AccentBand {
   const rel = lerp(NEON_FLOOR, 1, neon);
   const at = (L: number) => oklchToHex(L, rel * maxChroma(L, hue), hue);
-  // White always reads, so `hi` stays a lightness that reaches the target.
-  let lo = hexToOklch(background)[0], hi = 1;
+  const bgL = hexToOklch(background)[0];
+  if (mode === "dark") {
+    // White always reads, so `hi` stays a lightness that reaches the target.
+    let lo = bgL, hi = 1;
+    for (let i = 0; i < 24; i++) {
+      const m = (lo + hi) / 2;
+      if (contrastRatio(at(m), background) >= ACCENT_TARGET) hi = m; else lo = m;
+    }
+    const mid = Math.max(hi, lerp(MUTED_L, cuspL(hue), neon));
+    return { low: hi, mid, high: Math.max(mid, WHITE_L), at };
+  }
+  // Black always reads, so `lo` stays a lightness that reaches the target.
+  let lo = 0, hi = bgL;
   for (let i = 0; i < 24; i++) {
     const m = (lo + hi) / 2;
-    if (contrastRatio(at(m), background) >= ACCENT_TARGET) hi = m; else lo = m;
+    if (contrastRatio(at(m), background) >= ACCENT_TARGET) lo = m; else hi = m;
   }
-  const mid = Math.max(hi, lerp(MUTED_L, cuspL(hue), neon));
-  return { low: hi, mid, high: Math.max(mid, WHITE_L), at };
+  // A hue whose cusp is pale (yellow, lime) sits at the lightest lightness that reads: on paper it is gold, not lemon.
+  const mid = Math.min(lo, lerp(LIGHT_MUTED_L, cuspL(hue), neon));
+  return { low: lo, mid, high: Math.min(mid, LIGHT_DEEP_L), at };
 }
 
-function accentFor(k: Knobs, background: Hex): Hex {
-  const band = accentBand(k.hue, k.neon, background);
+function accentFor(k: Knobs, background: Hex, mode: Mode): Hex {
+  const band = accentBand(k.hue, k.neon, background, mode);
   let L = k.glow <= 0.5 ? lerp(band.low, band.mid, k.glow * 2) : lerp(band.mid, band.high, k.glow * 2 - 1);
   let accent = band.at(L);
-  // Belt and braces: lift until the label reads, should the gamut bend the curve.
-  while (contrastRatio(accent, background) < ACCENT_TARGET && L < 1) {
-    L = Math.min(1, L + 0.004);
+  // Belt and braces: move away from the field until the label reads, should the gamut bend the curve.
+  const step = mode === "dark" ? 0.004 : -0.004;
+  while (contrastRatio(accent, background) < ACCENT_TARGET && L > 0 && L < 1) {
+    L = clamp(L + step, 0, 1);
     accent = band.at(L);
   }
   return accent;
@@ -261,55 +293,57 @@ export function normalizeKnobs(k: Knobs): Knobs {
   };
 }
 
-/** The eight theme colours for a knob set. Every LIMITS guarantee holds for any input. */
-export function generate(input: Knobs): ThemeColors {
+/** The eight theme colours for a knob set, dark or light. Every LIMITS guarantee holds for any input. */
+export function generate(input: Knobs, mode: Mode = "dark"): ThemeColors {
   const k = normalizeKnobs(input);
   const fieldH = mod360(k.hue + k.field);
 
-  const background = oklchToHex(DEPTH_L * Math.sqrt(k.depth), k.tint * 0.035, fieldH);
+  const bgL = mode === "dark" ? DEPTH_L * Math.sqrt(k.depth) : 1 - LIGHT_DEPTH_L * Math.sqrt(k.depth);
+  const background = oklchToHex(bgL, k.tint * 0.035, fieldH);
   const yb = relLuminance(background);
 
-  // Surfaces: fixed WCAG steps over the background, tinted toward the field hue.
-  const raised = solveRatio(background, k.tint * 0.03, fieldH, 1.07);
-  const control = solveRatio(background, k.tint * 0.04, fieldH, 1.22);
-  const border = solveRatio(background, k.tint * 0.05, fieldH, 1.4);
+  // Surfaces: fixed WCAG steps off the background, tinted toward the field hue.
+  const raised = solveRatio(background, k.tint * 0.03, fieldH, 1.07, mode);
+  const control = solveRatio(background, k.tint * 0.04, fieldH, 1.22, mode);
+  const border = solveRatio(background, k.tint * 0.05, fieldH, 1.4, mode);
 
-  // Text, warm or cool with the field. Foreground can never beat white-on-bg; aim just below,
-  // and never above FG_MAX_RATIO.
-  const maxRatio = Math.min(21, 1.05 / (yb + 0.05));
+  // Text, warm or cool with the field. Foreground can never beat white-on-bg (black-on-bg on a
+  // light field); aim just below, and never above FG_MAX_RATIO.
+  const maxRatio = Math.min(21, mode === "dark" ? 1.05 / (yb + 0.05) : (yb + 0.05) / 0.05);
   const fgTarget = lerp(15.4, Math.max(15.4, Math.min(FG_MAX_RATIO, maxRatio * 0.985)), k.contrast);
   const redField = fieldH >= 350 || fieldH <= 40;
   const fgC = Math.min(0.02 * k.tint, redField ? FG_CHROMA_MAX_RED : FG_CHROMA_MAX);
-  const foreground = solveRatio(background, fgC, fieldH, fgTarget);
+  const foreground = solveRatio(background, fgC, fieldH, fgTarget, mode);
   const textC = Math.min(0.03 * k.tint, MUTED_CHROMA_MAX);
-  const mutedForeground = solveRatio(background, textC, fieldH, lerp(6.8, 9.5, k.contrast));
+  const mutedForeground = solveRatio(background, textC, fieldH, lerp(6.8, 9.5, k.contrast), mode);
   // The ring is also Paseo's faintest text (placeholders, timestamps) and terminal bright black.
   // A neutral ring takes the field's tint, as muted text does.
   const ringTarget = lerp(3.8, 4.7, k.contrast);
   const ringH = mod360(k.hue + (k.ring ?? 0));
   const ring =
     k.ring === null
-      ? solveRatio(background, textC, fieldH, ringTarget)
-      : solveRatio(background, (L) => ringShare(ringH) * maxChroma(L, ringH), ringH, ringTarget);
+      ? solveRatio(background, textC, fieldH, ringTarget, mode)
+      : solveRatio(background, (L) => ringShare(ringH) * maxChroma(L, ringH), ringH, ringTarget, mode);
 
-  const accent = accentFor(k, background);
+  const accent = accentFor(k, background, mode);
   return { background, foreground, raised, control, border, accent, mutedForeground, ring };
 }
 
 /** The status colours of a resolved theme. Separate from resolveTheme: only painting the app needs them. */
-export function resolveStatus(preset: Preset, knobs: Knobs, colors: ThemeColors): StatusColors {
-  return statusColors(knobs, preset, colors);
+export function resolveStatus(preset: Preset, knobs: Knobs, colors: ThemeColors, mode: Mode = "dark"): StatusColors {
+  return statusColors(knobs, preset, colors, mode);
 }
 
-/** A preset with the saved knobs applied. An unknown id falls back to the default preset. */
+/** A preset with the saved knobs applied, dark or light. An unknown id falls back to the default preset. */
 export function resolveTheme(
   presetId: string,
   knobs: Knobs | null,
-): { preset: Preset; knobs: Knobs; colors: ThemeColors } {
+  mode: Mode = "dark",
+): { preset: Preset; knobs: Knobs; colors: ThemeColors; mode: Mode } {
   const preset =
     PRESETS.find((p) => p.id === presetId) ?? PRESETS.find((p) => p.id === DEFAULT_PRESET_ID) ?? PRESETS[0];
   const k = knobs ?? preset.knobs;
-  return { preset, knobs: k, colors: generate(k) };
+  return { preset, knobs: k, colors: generate(k, mode), mode };
 }
 
 // ---------- measuring ----------
@@ -343,12 +377,12 @@ export function violations(t: ThemeColors): string[] {
 
 // ---------- fitting knobs to explicit colours ----------
 
-/** Best-effort knobs for an explicit dark theme, so a hand-made palette becomes a tweakable preset. */
+/** Best-effort knobs for an explicit dark theme (dark only), so a hand-made palette becomes a tweakable preset. */
 export function fit(t: ThemeColors): Knobs {
   const [aL, aC, aH] = hexToOklch(t.accent);
   const cmax = maxChroma(aL, aH);
   const neon = clamp(cmax > 0 ? (aC / cmax - NEON_FLOOR) / (1 - NEON_FLOOR) : 0, 0, 1);
-  const band = accentBand(aH, neon, t.background);
+  const band = accentBand(aH, neon, t.background, "dark");
   const glow =
     aL <= band.mid
       ? (band.mid > band.low ? (0.5 * (aL - band.low)) / (band.mid - band.low) : 0.5)
@@ -440,8 +474,10 @@ export const STATUS_LIMITS = {
   pairMin: 12,
   /** Against the accent, unless locked to it. */
   accentMin: 7,
-  /** Below this a status is grey, and grey says nothing. */
+  /** Below this a status is grey, and grey says nothing: unless the gamut at its lightness has no more to give (greyShare). */
   chromaMin: 0.07,
+  /** A status under chromaMin still counts as colour when it holds this share of the gamut at its lightness and hue. */
+  greyShare: 0.75,
   /** The stop button's white icon on the destructive fill. */
   destructiveOnWhite: 3.5,
   /** The destructive colour as text and as a fill on the background. */
@@ -505,11 +541,16 @@ function reads(hex: Hex, theme: ThemeColors, min: number): boolean {
   return contrastRatio(hex, theme.raised) >= min && contrastRatio(hex, theme.background) >= min;
 }
 
-function readable(L: number, share: number, h: number, theme: ThemeColors, min: number): Hex {
+/** Where a status may sit in lightness while it keeps away from the accent: the full band on each field. */
+const STATUS_L: Record<Mode, { lo: number; hi: number }> = { dark: { lo: 0.5, hi: 0.88 }, light: { lo: 0.2, hi: 0.62 } };
+
+function readable(L: number, share: number, h: number, theme: ThemeColors, min: number, mode: Mode): Hex {
+  const dark = mode === "dark";
   let l = L;
   let hex = paint(l, share, h);
-  while (l < 0.97 && !reads(hex, theme, min)) {
-    l += 0.004;
+  // Away from the field until it reads: lighter on a dark one, darker on a light one.
+  while ((dark ? l < 0.97 : l > 0.03) && !reads(hex, theme, min)) {
+    l += dark ? 0.004 : -0.004;
     hex = paint(l, share, h);
   }
   // A status the accent could be mistaken for moves in lightness once hue has nowhere left to go:
@@ -517,11 +558,12 @@ function readable(L: number, share: number, h: number, theme: ThemeColors, min: 
   const aL = hexToOklch(theme.accent)[0];
   const tooClose = (x: Hex) => deltaE(x, theme.accent) < STATUS_LIMITS.accentMin + 0.5;
   if (!tooClose(hex)) return hex;
+  const band = STATUS_L[mode];
   const search = (direction: number): Hex | null => {
     let walk = l;
     for (let i = 0; i < 36; i++) {
       walk += direction * 0.008;
-      if ((direction > 0 && walk > 0.88) || walk < 0.5) return null;
+      if ((direction > 0 && walk > band.hi) || walk < band.lo) return null;
       const candidate = paint(walk, share, h);
       if (!reads(candidate, theme, min)) return null;
       if (!tooClose(candidate)) return candidate;
@@ -532,8 +574,41 @@ function readable(L: number, share: number, h: number, theme: ThemeColors, min: 
   return search(l < aL ? -1 : 1) ?? search(l < aL ? 1 : -1) ?? hex;
 }
 
-export function statusColors(knobs: Knobs, preset: Preset, theme: ThemeColors): StatusColors {
+/**
+ * On paper a status sits at L 0.45..0.6, where yellow and teal have little gamut: a voice drawn
+ * at the pale edge of its band comes out grey. This slides the hue along the band, nearest first,
+ * toward wherever that lightness still carries colour, and keeps the first hue that does; failing
+ * that, the richest one tried. Dark fields have gamut to spare and are left as drawn.
+ */
+function enriched(
+  hex: Hex, h: number, lo: number, hi: number, share: number, theme: ThemeColors, min: number, mode: Mode,
+): { hex: Hex; h: number } {
+  const [L0, c0] = hexToOklch(hex);
+  if (mode === "dark" || c0 >= STATUS_LIMITS.chromaMin) return { hex, h };
+  let best = { hex, h, c: c0 };
+  for (let step = 3; step <= 90; step += 3) {
+    for (const sign of [1, -1]) {
+      const hh = h + sign * step;
+      if (hh < lo || hh > hi) continue;
+      const candidate = readable(L0, share, mod360(hh), theme, min, mode);
+      const c = hexToOklch(candidate)[1];
+      if (c >= STATUS_LIMITS.chromaMin) return { hex: candidate, h: hh };
+      if (c > best.c) best = { hex: candidate, h: hh, c };
+    }
+  }
+  return { hex: best.hex, h: best.h };
+}
+
+/**
+ * A status voice's lightness on a light field: drawn for a dark one, 0.6..0.9, where brighter is
+ * louder; on paper louder is darker, so the band maps to 0.6..0.5 and readable() takes it down
+ * from there until it reads.
+ */
+const lightVoiceL = (L: number) => lerp(0.6, 0.5, clamp((L - 0.6) / 0.3, 0, 1));
+
+export function statusColors(knobs: Knobs, preset: Preset, theme: ThemeColors, mode: Mode = "dark"): StatusColors {
   const spec = preset.status;
+  const dark = mode === "dark";
   const k = normalizeKnobs(knobs);
   const own = normalizeKnobs(preset.knobs);
   const drift = Math.sin((wrap180(k.hue - own.hue) * Math.PI) / 180);
@@ -545,11 +620,14 @@ export function statusColors(knobs: Knobs, preset: Preset, theme: ThemeColors): 
   // A pale accent can be avoided, but it cannot stand in for a status: it says nothing.
   const accentCanSpeak = aC >= 0.085 && aL <= 0.92;
 
-  const move = (v: StatusVoice, role: StatusRole) => ({
-    h: clampBand(role, v.h + DRIFT[role] * drift),
-    share: clamp(v.share + 0.25 * dNeon, 0.5, 1),
-    L: clamp(v.L + 0.07 * dGlow + 0.03 * dContrast, 0.6, 0.9),
-  });
+  const move = (v: StatusVoice, role: StatusRole) => {
+    const L = clamp(v.L + 0.07 * dGlow + 0.03 * dContrast, 0.6, 0.9);
+    return {
+      h: clampBand(role, v.h + DRIFT[role] * drift),
+      share: clamp(v.share + 0.25 * dNeon, 0.5, 1),
+      L: dark ? L : lightVoiceL(L),
+    };
+  };
 
   // Success: the accent itself, or its own voice melting into the accent as they approach.
   let success: Hex;
@@ -563,26 +641,35 @@ export function statusColors(knobs: Knobs, preset: Preset, theme: ThemeColors): 
     if (accentReads) return theme.accent;
     let l = aL;
     let hex = theme.accent;
-    while (l < 0.97 && (contrastRatio(hex, theme.raised) < STATUS_LIMITS.textMin || contrastRatio(hex, theme.background) < STATUS_LIMITS.textMin)) {
-      l += 0.004;
+    while ((dark ? l < 0.97 : l > 0.03) && !reads(hex, theme, STATUS_LIMITS.textMin)) {
+      l += dark ? 0.004 : -0.004;
       hex = oklchToHex(l, accentShare * maxChroma(l, aH), aH);
     }
     return hex;
   };
+  const successLo = STATUS_BAND.success.c - STATUS_BAND.success.half;
+  const successHi = STATUS_BAND.success.c + STATUS_BAND.success.half;
   if (spec.success === "accent" && accentCanSpeak) {
     successH = foldSuccess(aH);
-    success = inBand("success", aH)
-      ? accentAsSuccess()
-      : readable(Math.min(aL, 0.82), Math.max(accentShare, 0.5), successH, theme, STATUS_LIMITS.textMin);
+    if (inBand("success", aH)) success = accentAsSuccess();
+    else {
+      const share = Math.max(accentShare, 0.5);
+      const drawn = readable(dark ? Math.min(aL, 0.82) : Math.max(aL, 0.3), share, successH, theme, STATUS_LIMITS.textMin, mode);
+      ({ hex: success, h: successH } = enriched(drawn, successH, successLo, successHi, share, theme, STATUS_LIMITS.textMin, mode));
+    }
   } else {
     const fallback: StatusVoice = spec.success === "accent" ? { h: 150, share: 0.6, L: 0.74 } : spec.success;
     const v = move(fallback, "success");
     const near = accentCanSpeak && inBand("success", aH) ? smooth((30 - hueGap(v.h, aH)) / 16) : 0;
     successH = near >= 1 ? aH : mod360(v.h + wrap180(aH - v.h) * near);
-    success =
-      near >= 1
-        ? accentAsSuccess()
-        : readable(lerp(v.L, aL, near), lerp(v.share, accentShare, near), successH, theme, STATUS_LIMITS.textMin);
+    if (near >= 1) success = accentAsSuccess();
+    else {
+      const share = lerp(v.share, accentShare, near);
+      const drawn = readable(lerp(v.L, aL, near), share, successH, theme, STATUS_LIMITS.textMin, mode);
+      // Melting toward the accent is a hue of its own; only a voice standing alone may slide.
+      ({ hex: success, h: successH } =
+        near > 0 ? { hex: drawn, h: successH } : enriched(drawn, successH, successLo, successHi, share, theme, STATUS_LIMITS.textMin, mode));
+    }
   }
 
   // Danger keeps away from the accent, within its band.
@@ -597,9 +684,22 @@ export function statusColors(knobs: Knobs, preset: Preset, theme: ThemeColors): 
   let warningH = clamp(wv.h, lo, Math.max(lo, hi));
   if (accentHasHue) warningH = awayFrom(warningH, aH, ACCENT_HUE_GAP, lo, Math.max(lo, hi));
 
-  const dangerH = mod360(dangerSigned);
-  const danger = readable(dv.L, dv.share, dangerH, theme, STATUS_LIMITS.textMin);
-  let warning = readable(wv.L, wv.share, warningH, theme, STATUS_LIMITS.textMin);
+  const dangerDrawn = readable(dv.L, dv.share, mod360(dangerSigned), theme, STATUS_LIMITS.textMin, mode);
+  // Slid only where the accent leaves room, so the gap to it holds.
+  const dangerRoom = accentHasHue
+    ? (() => {
+        const a = wrap180(aH);
+        return dangerSigned >= a ? { lo: Math.max(-18, a + ACCENT_HUE_GAP), hi: 42 } : { lo: -18, hi: Math.min(42, a - ACCENT_HUE_GAP) };
+      })()
+    : { lo: -18, hi: 42 };
+  const dangerFit = enriched(dangerDrawn, dangerSigned, Math.min(dangerRoom.lo, dangerSigned), Math.max(dangerRoom.hi, dangerSigned), dv.share, theme, STATUS_LIMITS.textMin, mode);
+  dangerSigned = dangerFit.h;
+  let danger = dangerFit.hex;
+  // Warning's room follows the danger it ended up at.
+  const lo2 = Math.max(58, dangerSigned + STATUS_LIMITS.gapWarningDanger);
+  warningH = clamp(warningH, lo2, Math.max(lo2, hi));
+  let warning = readable(wv.L, wv.share, warningH, theme, STATUS_LIMITS.textMin, mode);
+  ({ hex: warning, h: warningH } = enriched(warning, warningH, lo2, Math.max(lo2, hi), wv.share, theme, STATUS_LIMITS.textMin, mode));
   // Amber has the room to move. Outward from the drawn lightness, nearest first, leaning away
   // from the closer neighbour and richer the further it goes, until it clears both.
   const crowded = (x: Hex) =>
@@ -609,13 +709,14 @@ export function statusColors(knobs: Knobs, preset: Preset, theme: ThemeColors): 
     const lean = deltaE(warning, success) < deltaE(warning, danger) ? -0.5 : 0.5;
     search: for (let step = 1; step <= 40; step++) {
       for (const sign of [1, -1]) {
-        const h = clamp(warningH + lean * step, lo, Math.max(lo, hi));
+        const h = clamp(warningH + lean * step, lo2, Math.max(lo2, hi));
         const candidate = readable(
-          clamp(drawnL + sign * step * 0.006, 0.6, 0.86),
+          dark ? clamp(drawnL + sign * step * 0.006, 0.6, 0.86) : clamp(drawnL + sign * step * 0.006, 0.3, 0.6),
           Math.min(1, wv.share + step * 0.02),
           h,
           theme,
           STATUS_LIMITS.textMin,
+          mode,
         );
         if (!crowded(candidate)) {
           warning = candidate;
@@ -625,6 +726,19 @@ export function statusColors(knobs: Knobs, preset: Preset, theme: ThemeColors): 
       }
     }
   }
+  // On paper amber and vermilion are both brown at reading depth, and amber has nowhere richer to
+  // go; then the danger slides toward crimson, where dark reds keep their chroma, as far as the accent allows.
+  if (!dark && crowded(warning)) {
+    for (let h = dangerSigned - 3; h >= dangerRoom.lo; h -= 3) {
+      const candidate = readable(dv.L, Math.min(1, dv.share + 0.1), mod360(h), theme, STATUS_LIMITS.textMin, mode);
+      if (deltaE(warning, candidate) >= STATUS_LIMITS.pairMin + 0.3 && deltaE(candidate, success) >= STATUS_LIMITS.pairMin + 0.3) {
+        danger = candidate;
+        dangerSigned = h;
+        break;
+      }
+    }
+  }
+  const dangerH = mod360(dangerSigned);
 
   const dot = (hex: Hex, h: number): Hex => {
     const [L, C] = hexToOklch(hex);
@@ -635,11 +749,11 @@ export function statusColors(knobs: Knobs, preset: Preset, theme: ThemeColors): 
   const family = [success, warning, danger].map(hexToOklch);
   const meanL = family.reduce((sum, [L]) => sum + L, 0) / 3;
   const meanShare = family.reduce((sum, [L, C, h]) => sum + C / Math.max(1e-6, maxChroma(L, h)), 0) / 3;
-  const merged = readable(meanL, meanShare, MERGED_HUE, theme, STATUS_LIMITS.textMin);
+  const merged = readable(meanL, meanShare, MERGED_HUE, theme, STATUS_LIMITS.textMin, mode);
   const accentIsBlue = accentCanSpeak && aH >= 215 && aH <= 300;
   const runningDot = accentIsBlue
     ? dot(theme.accent, aH)
-    : dot(readable(meanL, meanShare, RUNNING_HUE, theme, STATUS_LIMITS.textMin), RUNNING_HUE);
+    : dot(readable(meanL, meanShare, RUNNING_HUE, theme, STATUS_LIMITS.textMin, mode), RUNNING_HUE);
 
   const [dangerL, dangerC] = hexToOklch(danger);
   let destructive = danger;
@@ -675,7 +789,8 @@ export function statusViolations(s: StatusColors, theme: ThemeColors): string[] 
     if (contrastRatio(hex, theme.raised) < STATUS_LIMITS.textMin - 0.02) out.push(`${role}:raised`);
     if (contrastRatio(dot, theme.control) < STATUS_LIMITS.dotMin) out.push(`${role}:dot`);
     if (!inBand(role, h, 1.5)) out.push(`${role}:band(${h.toFixed(0)})`);
-    if (C < STATUS_LIMITS.chromaMin) out.push(`${role}:grey(${C.toFixed(3)})`);
+    const [L] = hexToOklch(hex);
+    if (C < STATUS_LIMITS.chromaMin && C < STATUS_LIMITS.greyShare * maxChroma(L, h)) out.push(`${role}:grey(${C.toFixed(3)})`);
   }
   const hOf = (x: Hex) => hexToOklch(x)[2];
   if (hueGap(hOf(s.warning), hOf(s.danger)) < STATUS_LIMITS.gapWarningDanger - 2) out.push("gap:warning-danger");

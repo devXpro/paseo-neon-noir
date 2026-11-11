@@ -1,9 +1,10 @@
 # Neon Noir
 
-A theme studio for [Paseo](https://paseo.sh). Pick one of 20 dark presets in five collections (Ink,
+A theme studio for [Paseo](https://paseo.sh). Pick one of 20 presets in five collections (Ink,
 Neon, Terminal, Luxe, Frost), tune it with eight knobs, and let each preset bring its own pair of
-fonts. Every setting stays dark and keeps its contrast guarantees. Mac and iPhone, stock Paseo, no
-patches.
+fonts. Every preset comes dark or light: the same knobs on a white field, every colour
+solved darker instead of lighter. Dark, light, or whatever the device's system is set to, and every
+setting keeps its contrast guarantees in both. Mac and iPhone, stock Paseo, no patches.
 
 ![Noir, Kowloon, Brass Deco and Phosphor](media/hero.png)
 
@@ -37,12 +38,18 @@ on this device only; turning it off gives the device its
 previous theme back and leaves its fonts and sizes alone. The sidebar row names the preset shown
 here, or says _Off_.
 
+Under the switch, **Dark / Light / System** chooses the field for every preset. _Light_ turns a
+preset over: pure black becomes pure white, graphite becomes paper, and the accent, text and status
+colours are solved darker until they read. _System_ follows the device's own light or dark setting
+and switches with it, no restart. The sidebar row then names the preset with _· Light_ while the
+light look is painted.
+
 Every preset keeps its own adjustments, so several can be tuned and switched between. The studio's
 choice is kept by the host, so every app connected to it, the phone included, paints the same
 preset and adjustments; whether an app shows Neon Noir at all is its own switch.
 
 Should a device not take the switch (the studio then offers a reload), pick **Neon Noir** in
-**Settings → Appearance** instead; it is listed as _Neon Noir · <preset>_.
+**Settings → Appearance** instead; it is listed as _Neon Noir · <preset>_ (or _<preset> Light_).
 
 ## Presets
 

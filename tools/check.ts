@@ -5,8 +5,10 @@
 
 import {
   LIMITS, contrastRatio, deltaE, fit, generate, hexToOklch, metrics, normalizeKnobs, resolveStatus, resolveTheme,
-  statusColors, statusViolations, violations, type StatusColors, type ThemeColors,
+  statusColors, statusViolations, violations, type Mode, type StatusColors, type ThemeColors,
 } from "../shared/engine.ts";
+
+const MODES: Mode[] = ["dark", "light"];
 import { PRESETS } from "../shared/presets.ts";
 import { DEFAULT_PRESET_ID, KNOBS, knobsSchema, type Knobs } from "../shared/settings.ts";
 
@@ -32,18 +34,21 @@ for (const p of PRESETS) {
   }
 }
 
-console.log("== Presets (WCAG ratios against the background) ==");
-console.log(pad("preset", 16) + pad("collection", 11) + pad("accent", 9) + pad("bg", 9) + "fg     muted  onAcc  ring   border raised ctrl   violations");
-for (const p of PRESETS) {
-  const t = resolveTheme(p.id, null).colors;
-  const m = metrics(t);
-  const v = violations(t);
-  if (v.length) problems.push(`${p.id}: ${v.join(",")}`);
-  console.log(
-    pad(p.name, 16) + pad(p.collection, 11) + pad(t.accent, 9) + pad(t.background, 9) +
-    [m.fg, m.muted, m.onAccent, m.ring, m.border, m.raised, m.control].map((x) => pad(f(x), 6)).join(" ") +
-    " " + (v.length ? v.join(",") : "ok"),
-  );
+for (const mode of MODES) {
+  console.log(`== Presets, ${mode} (WCAG ratios against the background) ==`);
+  console.log(pad("preset", 16) + pad("collection", 11) + pad("accent", 9) + pad("bg", 9) + "fg     muted  onAcc  ring   border raised ctrl   violations");
+  for (const p of PRESETS) {
+    const t = resolveTheme(p.id, null, mode).colors;
+    const m = metrics(t);
+    const v = violations(t);
+    if (v.length) problems.push(`${p.id} ${mode}: ${v.join(",")}`);
+    console.log(
+      pad(p.name, 16) + pad(p.collection, 11) + pad(t.accent, 9) + pad(t.background, 9) +
+      [m.fg, m.muted, m.onAccent, m.ring, m.border, m.raised, m.control].map((x) => pad(f(x), 6)).join(" ") +
+      " " + (v.length ? v.join(",") : "ok"),
+    );
+  }
+  console.log("");
 }
 
 // ---- design review: warnings, not failures ----
@@ -135,13 +140,14 @@ for (let i = 0; i < 30000; i++) {
   });
 }
 
+for (const mode of MODES) {
 const fails: Record<string, number> = {};
 const worst = { fgMin: 99, fgMax: 0, mutedMin: 99, onAccentMin: 99, ringMin: 99, ringMax: 0, borderMin: 99, borderMax: 0, raisedMin: 99, raisedMax: 0, controlMin: 99, controlMax: 0 };
 const bad: { k: Knobs; v: string[] }[] = [];
 const started = Date.now();
 for (const c of cases) {
   const k = normalizeKnobs(c);
-  const t = generate(k);
+  const t = generate(k, mode);
   const m = metrics(t);
   worst.fgMin = Math.min(worst.fgMin, m.fg); worst.fgMax = Math.max(worst.fgMax, m.fg);
   worst.mutedMin = Math.min(worst.mutedMin, m.muted);
@@ -156,27 +162,30 @@ for (const c of cases) {
 }
 const ms = (Date.now() - started) / cases.length;
 
-console.log(`\n== Fuzz: ${cases.length} knob sets, ${f(ms, 3)} ms per theme ==`);
+console.log(`\n== Fuzz, ${mode}: ${cases.length} knob sets, ${f(ms, 3)} ms per theme ==`);
 console.log("limits :", JSON.stringify(LIMITS));
 console.log("worst  :", JSON.stringify(Object.fromEntries(Object.entries(worst).map(([a, b]) => [a, +b.toFixed(3)]))));
 console.log("fails  :", JSON.stringify(fails));
-for (const b of bad) console.log("  e.g.", JSON.stringify(b.k), b.v.join(","), JSON.stringify(generate(b.k)));
+for (const b of bad) console.log("  e.g.", JSON.stringify(b.k), b.v.join(","), JSON.stringify(generate(b.k, mode)));
 
 const fuzzFails = Object.values(fails).reduce((a, b) => a + b, 0);
-if (fuzzFails) problems.push(`fuzz: ${fuzzFails} violations`);
+if (fuzzFails) problems.push(`fuzz ${mode}: ${fuzzFails} violations`);
+}
 
 // ---- status colours ----
-console.log("\n== Status colours (ratios on background / card, distance from accent) ==");
 const triples: { id: string; s: StatusColors }[] = [];
-for (const p of PRESETS) {
-  const { knobs, colors: t } = resolveTheme(p.id, null);
-  const s = resolveStatus(p, knobs, t);
-  triples.push({ id: p.id, s });
-  const v = statusViolations(s, t);
-  if (v.length) problems.push(`${p.id} status: ${v.join(",")}`);
-  const cell = (hex: string) =>
-    `${hex} ${f(contrastRatio(hex, t.background), 1)}/${f(contrastRatio(hex, t.raised), 1)} d${f(deltaE(hex, t.accent), 1)}`;
-  console.log(pad(p.name, 16) + [cell(s.success), cell(s.warning), cell(s.danger)].map((c) => pad(c, 28)).join("") + (v.length ? v.join(",") : "ok"));
+for (const mode of MODES) {
+  console.log(`\n== Status colours, ${mode} (ratios on background / card, distance from accent) ==`);
+  for (const p of PRESETS) {
+    const { knobs, colors: t } = resolveTheme(p.id, null, mode);
+    const s = resolveStatus(p, knobs, t, mode);
+    if (mode === "dark") triples.push({ id: p.id, s });
+    const v = statusViolations(s, t);
+    if (v.length) problems.push(`${p.id} status ${mode}: ${v.join(",")}`);
+    const cell = (hex: string) =>
+      `${hex} ${f(contrastRatio(hex, t.background), 1)}/${f(contrastRatio(hex, t.raised), 1)} d${f(deltaE(hex, t.accent), 1)}`;
+    console.log(pad(p.name, 16) + [cell(s.success), cell(s.warning), cell(s.danger)].map((c) => pad(c, 28)).join("") + (v.length ? v.join(",") : "ok"));
+  }
 }
 // One formula on many backgrounds is the failure this report exists to catch.
 const tripleGaps: [number, string][] = [];
@@ -207,22 +216,28 @@ function knobsNear(base: Knobs): Knobs {
     field: keep() ? base.field : angle(),
   };
 }
-const statusFails: Record<string, number> = {};
-let statusRuns = 0;
-for (const p of PRESETS) {
-  for (let i = 0; i < 1500; i++) {
-    const k = knobsNear(p.knobs);
-    const t = generate(k);
-    statusRuns++;
-    for (const x of statusViolations(statusColors(k, p, t), t)) {
-      const key = x.replace(/\(.*\)/, "");
-      statusFails[key] = (statusFails[key] ?? 0) + 1;
+for (const mode of MODES) {
+  const statusFails: Record<string, number> = {};
+  let statusRuns = 0;
+  const examples: string[] = [];
+  for (const p of PRESETS) {
+    for (let i = 0; i < 1500; i++) {
+      const k = knobsNear(p.knobs);
+      const t = generate(k, mode);
+      statusRuns++;
+      const v = statusViolations(statusColors(k, p, t, mode), t);
+      for (const x of v) {
+        const key = x.replace(/\(.*\)/, "");
+        statusFails[key] = (statusFails[key] ?? 0) + 1;
+      }
+      if (v.length && examples.length < 5) examples.push(`${p.id} ${JSON.stringify(k)} ${v.join(",")}`);
     }
   }
+  console.log(`\n== Status fuzz, ${mode}: ${statusRuns} knob sets ==`);
+  console.log("fails  :", JSON.stringify(statusFails));
+  for (const e of examples) console.log("  e.g.", e);
+  const statusFuzzFails = Object.values(statusFails).reduce((a, b) => a + b, 0);
+  if (statusFuzzFails) problems.push(`status fuzz ${mode}: ${statusFuzzFails} violations`);
 }
-console.log(`\n== Status fuzz: ${statusRuns} knob sets ==`);
-console.log("fails  :", JSON.stringify(statusFails));
-const statusFuzzFails = Object.values(statusFails).reduce((a, b) => a + b, 0);
-if (statusFuzzFails) problems.push(`status fuzz: ${statusFuzzFails} violations`);
 console.log(problems.length ? `\nFAIL\n- ${problems.join("\n- ")}` : "\nRESULT: ok");
 process.exit(problems.length ? 1 : 0);

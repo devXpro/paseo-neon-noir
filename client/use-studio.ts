@@ -1,25 +1,36 @@
 import { useSettings, type SettingsState } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
-import { resolveStatus, resolveTheme } from "../shared/engine.ts";
+import { resolveStatus, resolveTheme, type Mode } from "../shared/engine.ts";
 import type { Preset } from "../shared/presets.ts";
-import { KNOBS, editOf, presetById, studioSettings, type Knobs } from "../shared/settings.ts";
+import {
+  KNOBS,
+  editOf,
+  effectiveMode,
+  presetById,
+  studioSettings,
+  type AppearanceChoice,
+  type Knobs,
+} from "../shared/settings.ts";
 import type { LiveTheme, StudioValues } from "./live-theme.ts";
 
 export type KnobId = keyof Knobs;
 export type Edits = StudioValues["edits"];
 
-/** What the studio shows: the values, and the theme they make, worked out once per change. */
+/** What the studio shows: the values, and the theme they make on this device, worked out once per change. */
 export interface Shown {
   values: StudioValues;
+  /** The mode the values come to here: dark, light, or what the system says. */
+  mode: Mode;
   resolved: ReturnType<typeof resolveTheme>;
 }
 
 /** What the studio starts from when the host's copy cannot be had: presets are local. */
 const DEFAULTS: StudioValues = studioSettings.schema.parse({});
 
-function shownOf(values: StudioValues): Shown {
+function shownOf(values: StudioValues, system: Mode): Shown {
   const preset = presetById(values.presetId);
-  return { values, resolved: resolveTheme(preset.id, editOf(values.edits, preset.id)) };
+  const mode = effectiveMode(values.appearance, system);
+  return { values, mode, resolved: resolveTheme(preset.id, editOf(values.edits, preset.id), mode) };
 }
 
 export function sameKnobs(a: Knobs | null, b: Knobs | null): boolean {
@@ -32,7 +43,8 @@ function sameEdits(a: Edits, b: Edits): boolean {
   return ids.length === Object.keys(b).length && ids.every((id) => sameKnobs(editOf(a, id), editOf(b, id)));
 }
 
-const sameValues = (a: StudioValues, b: StudioValues) => a.presetId === b.presetId && sameEdits(a.edits, b.edits);
+const sameValues = (a: StudioValues, b: StudioValues) =>
+  a.presetId === b.presetId && a.appearance === b.appearance && sameEdits(a.edits, b.edits);
 
 function withKnob<Id extends KnobId>(knobs: Knobs, id: Id, value: Knobs[Id]): Knobs {
   return { ...knobs, [id]: value };
@@ -84,12 +96,20 @@ export function useStudio(live: LiveTheme) {
   // newer revision on the host is taken in by the effect below either way.
   const [shown, setShown] = useState<Shown | null>(() => {
     const saved = live.saved();
-    if (session.current === null && saved !== null) session.current = shownOf(saved);
+    if (session.current === null && saved !== null) session.current = shownOf(saved, live.systemMode());
     return session.current;
   });
   const [dragging, setDragging] = useState(session.draggingNow);
 
   useEffect(() => live.hold(), [live]);
+  // The system switching between light and dark while the studio is open: the same values, the other mode.
+  useEffect(
+    () =>
+      live.subscribeSystem(() => {
+        if (session.current !== null) show(session.current.values);
+      }),
+    [live],
+  );
   useEffect(
     () => () => {
       if (session.frame !== null) cancelAnimationFrame(session.frame);
@@ -101,11 +121,18 @@ export function useStudio(live: LiveTheme) {
   /** Shows these values here and, unless a drag is previewing, paints them on the app. */
   function show(values: StudioValues, paint = true) {
     const now = session.current;
-    const next = now !== null && sameValues(now.values, values) ? now : shownOf(values);
+    const system = live.systemMode();
+    const next =
+      now !== null && sameValues(now.values, values) && now.mode === effectiveMode(values.appearance, system)
+        ? now
+        : shownOf(values, system);
     session.current = next;
     setShown(next);
     // A no-op when these colours are painted already.
-    if (paint) live.update(next.resolved.colors, next.resolved.preset, resolveStatus(next.resolved.preset, next.resolved.knobs, next.resolved.colors));
+    if (paint) {
+      const { preset, knobs, colors, mode } = next.resolved;
+      live.update(colors, preset, resolveStatus(preset, knobs, colors, mode), mode);
+    }
   }
 
   function flush() {
@@ -178,6 +205,11 @@ export function useStudio(live: LiveTheme) {
       const now = session.current;
       if (now === null || presetById(presetId).id === now.resolved.preset.id) return;
       commit({ ...now.values, presetId });
+    },
+    /** Dark, light or system, for every preset. */
+    setAppearance(appearance: AppearanceChoice) {
+      const now = session.current;
+      if (now !== null && now.values.appearance !== appearance) commit({ ...now.values, appearance });
     },
     /** Drops the shown preset's edits. */
     resetKnobs() {
