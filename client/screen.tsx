@@ -12,7 +12,7 @@ import {
   type RefObject,
 } from "react";
 import { Platform, ScrollView, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
-import { DEFAULT_PRESET_ID, presetById } from "../shared/settings.ts";
+import { DEFAULT_PRESET_ID, presetById, type AppearanceChoice } from "../shared/settings.ts";
 import { AdjustPanel } from "./adjust.tsx";
 import { Segmented } from "./components/segmented.tsx";
 import { Banner, Hero } from "./hero.tsx";
@@ -36,6 +36,11 @@ const TABS = [
   { value: "style", label: "Style" },
 ] as const;
 type Tab = (typeof TABS)[number]["value"];
+const APPEARANCE_OPTIONS = [
+  { value: "dark", label: "Dark" },
+  { value: "light", label: "Light" },
+  { value: "system", label: "System" },
+] as const satisfies readonly { value: AppearanceChoice; label: string }[];
 
 /**
  * Paseo remounts a screen whenever a font, a size or a theme colour changes, which a tap here
@@ -159,6 +164,7 @@ function Studio({ theme, live, style }: PluginScreenProps & { live: LiveTheme; s
           gap: SPACE.small,
         },
         styleSection: { marginTop: GROUP_GAP, gap: SPACE.small },
+        appearanceRow: { paddingHorizontal: SPACE.large, paddingVertical: SPACE.small },
         // Above the groups' own uppercase headers, so a heading of the same style would stutter.
         title: {
           paddingHorizontal: SPACE.large,
@@ -180,14 +186,25 @@ function Studio({ theme, live, style }: PluginScreenProps & { live: LiveTheme; s
   const { preset, colors, knobs } = shown.resolved;
   const edited = !sameKnobs(knobs, preset.knobs);
 
+  const appearance = shown.values.appearance;
   const switchCard = (
-    <Group theme={theme} footer="Paints Paseo on this device. Presets and adjustments sync to all your devices.">
+    <Group
+      theme={theme}
+      footer={
+        appearance === "system"
+          ? `Paints Paseo on this device, ${shown.mode} while the system is. Presets, adjustments and this choice sync to all your devices.`
+          : "Paints Paseo on this device. Presets, adjustments and this choice sync to all your devices."
+      }
+    >
       <SwitchRow
         theme={theme}
         label="Neon Noir"
         value={on}
         onChange={(next) => void (next ? style.activate() : style.deactivate())}
       />
+      <View style={styles.appearanceRow}>
+        <Segmented<AppearanceChoice> options={APPEARANCE_OPTIONS} value={appearance} theme={theme} onChange={studio.setAppearance} />
+      </View>
     </Group>
   );
   const hero = <Hero theme={theme} runtime={style} preset={preset} colors={colors} edited={edited} compact={!wide} />;
@@ -198,6 +215,7 @@ function Studio({ theme, live, style }: PluginScreenProps & { live: LiveTheme; s
       selectedId={preset.id}
       selectedColors={colors}
       edits={shown.values.edits}
+      mode={shown.mode}
       onSelect={(id) => {
         // The first pick is asking to see the look: it turns Neon Noir on, unless it was turned off here.
         if (!on && !styleState.declined) void style.activate();

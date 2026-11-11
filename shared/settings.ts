@@ -1,5 +1,6 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import type { Mode } from "./engine.ts";
 import { PRESETS, type Preset } from "./presets.ts";
 
 /** The Adjust panel's groups. */
@@ -65,6 +66,16 @@ export const knobsSchema = z.object({
 
 export const DEFAULT_PRESET_ID = "noir";
 
+/** Dark or light for every preset, or whichever this device's system is set to. */
+export const APPEARANCES = ["dark", "light", "system"] as const;
+export type AppearanceChoice = (typeof APPEARANCES)[number];
+export const DEFAULT_APPEARANCE: AppearanceChoice = "dark";
+
+/** The mode a choice comes to on a device whose system is in `system` mode. */
+export function effectiveMode(choice: AppearanceChoice, system: Mode): Mode {
+  return choice === "system" ? system : choice;
+}
+
 /** The preset with this id; an unknown id falls back to the default, as resolveTheme does. */
 export function presetById(id: string): Preset {
   return PRESETS.find((preset) => preset.id === id) ?? PRESETS.find((preset) => preset.id === DEFAULT_PRESET_ID) ?? PRESETS[0];
@@ -91,8 +102,9 @@ function migrateKnobs(input: unknown): unknown {
 }
 
 /**
- * The host keeps one choice for every app connected to it: the preset picked, and the knobs of
- * every preset that was adjusted. A preset without an entry in `edits` is as it ships.
+ * The host keeps one choice for every app connected to it: the preset picked, the knobs of
+ * every preset that was adjusted, and dark, light or system. A preset without an entry in
+ * `edits` is as it ships; a file saved before the choice existed is dark.
  */
 export const studioSettings = defineSettings({
   id: "studio",
@@ -103,6 +115,7 @@ export const studioSettings = defineSettings({
     z.object({
       presetId: z.string().default(DEFAULT_PRESET_ID),
       edits: z.record(z.string(), knobsSchema).default({}),
+      appearance: z.enum(APPEARANCES).default(DEFAULT_APPEARANCE),
     }),
   ),
 });

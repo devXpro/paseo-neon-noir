@@ -1,10 +1,11 @@
 import { settingsRpc } from "@getpaseo/plugin";
 import type { PluginCleanup } from "@getpaseo/plugin";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
+import { Appearance } from "react-native";
 import type { output as ZodOutput } from "zod";
-import { resolveStatus, resolveTheme, type StatusColors, type ThemeColors } from "../shared/engine.ts";
+import { resolveStatus, resolveTheme, type Mode, type StatusColors, type ThemeColors } from "../shared/engine.ts";
 import type { Preset } from "../shared/presets.ts";
-import { DEFAULT_PRESET_ID, editOf, presetById, studioSettings } from "../shared/settings.ts";
+import { DEFAULT_APPEARANCE, DEFAULT_PRESET_ID, editOf, effectiveMode, presetById, studioSettings } from "../shared/settings.ts";
 
 export type StudioValues = ZodOutput<typeof studioSettings.schema>;
 
@@ -13,8 +14,12 @@ export type StudioValues = ZodOutput<typeof studioSettings.schema>;
  * or in Settings → Appearance) through every repaint; its colours and name are whatever the studio shows.
  */
 export interface LiveTheme {
-  /** Repaints the app with these colours, named after the preset. A no-op when they are painted already. */
-  update(colors: ThemeColors, preset: Preset, status: StatusColors): void;
+  /** Repaints the app with these colours, dark or light, named after the preset. A no-op when they are painted already. */
+  update(colors: ThemeColors, preset: Preset, status: StatusColors, mode: Mode): void;
+  /** Whether this device's system is in light or dark mode now. */
+  systemMode(): Mode;
+  /** Called when the system switches between light and dark. */
+  subscribeSystem(listener: () => void): () => void;
   /** What the theme object Paseo builds must carry beyond the eight colours addTheme accepts. */
   overlay(): ThemeOverlay | null;
   /** Registers the same theme again, once per set of colours, for a commit the overlay can ride on. */
@@ -56,7 +61,10 @@ const THEME_ID = "live";
 /** How many painted colour pairs `isShowing` accepts: the app applies a repaint a frame or two late. */
 const RECENT = 32;
 
-export const themeName = (preset: Preset) => `Neon Noir · ${preset.name}`;
+export const themeName = (preset: Preset, mode: Mode) => `Neon Noir · ${preset.name}${mode === "light" ? " Light" : ""}`;
+
+/** What the device's system says, dark unless it says light. */
+export const readSystemMode = (): Mode => (Appearance.getColorScheme() === "light" ? "light" : "dark");
 
 const signatureOf = (colors: ThemeColors, name: string, status: StatusColors) =>
   [
@@ -95,8 +103,8 @@ export function createLiveTheme(client: PluginClientContext): LiveTheme {
   let reads = 0;
   let disposed = false;
 
-  function update(colors: ThemeColors, preset: Preset, status: StatusColors) {
-    const name = themeName(preset);
+  function update(colors: ThemeColors, preset: Preset, status: StatusColors, mode: Mode) {
+    const name = themeName(preset, mode);
     const next = signatureOf(colors, name, status);
     if (disposed || next === signature) return;
     // Before the registration: the commit it causes is the one the overlay must ride on.
@@ -104,10 +112,10 @@ export function createLiveTheme(client: PluginClientContext): LiveTheme {
     // Removing first frees the id for the new registration. Both registry publishes land in this
     // one task and React renders them as one commit, so the default theme never shows in between.
     void remove?.();
-    registered = { id: THEME_ID, name, appearance: "dark", colors };
+    registered = { id: THEME_ID, name, appearance: mode, colors };
     remove = client.addTheme(registered);
     signature = next;
-    presetName = preset.name;
+    presetName = mode === "light" ? `${preset.name} · Light` : preset.name;
     recent.push(pairOf(colors.background, colors.accent));
     if (recent.length > RECENT) recent.shift();
     for (const listener of listeners) listener();
@@ -125,14 +133,29 @@ export function createLiveTheme(client: PluginClientContext): LiveTheme {
     const parsed = studioSettings.schema.safeParse(result.values);
     if (!parsed.success) return;
     saved = parsed.data;
-    if (holds > 0) return;
-    const preset = presetById(saved.presetId);
-    const resolved = resolveTheme(preset.id, editOf(saved.edits, preset.id));
-    update(resolved.colors, preset, resolveStatus(preset, resolved.knobs, resolved.colors));
+    paintSaved();
   }
 
-  const initial = resolveTheme(DEFAULT_PRESET_ID, null);
-  update(initial.colors, initial.preset, resolveStatus(initial.preset, initial.knobs, initial.colors));
+  /** Paints the host's saved look in the mode its choice comes to on this device now. */
+  function paintSaved() {
+    if (saved === null || holds > 0) return;
+    const preset = presetById(saved.presetId);
+    const mode = effectiveMode(saved.appearance, readSystemMode());
+    const resolved = resolveTheme(preset.id, editOf(saved.edits, preset.id), mode);
+    update(resolved.colors, preset, resolveStatus(preset, resolved.knobs, resolved.colors, mode), mode);
+  }
+
+  const initial = resolveTheme(DEFAULT_PRESET_ID, null, effectiveMode(DEFAULT_APPEARANCE, readSystemMode()));
+  update(initial.colors, initial.preset, resolveStatus(initial.preset, initial.knobs, initial.colors, initial.mode), initial.mode);
+
+  // The system switching between light and dark: repaint from what is saved, or tell an open
+  // studio, which paints its own unsaved values.
+  const systemListeners = new Set<() => void>();
+  const appearance = Appearance.addChangeListener(() => {
+    if (disposed) return;
+    for (const listener of systemListeners) listener();
+    paintSaved();
+  });
 
   const observation = client.paseo.observeEvents(["status.plugin_settings_changed"]);
   observation.subscribe({
@@ -154,6 +177,13 @@ export function createLiveTheme(client: PluginClientContext): LiveTheme {
 
   return {
     update,
+    systemMode: readSystemMode,
+    subscribeSystem(listener) {
+      systemListeners.add(listener);
+      return () => {
+        systemListeners.delete(listener);
+      };
+    },
     overlay: () => overlay,
     repaintOnce() {
       if (disposed || registered === null || repainted === signature) return;
@@ -183,6 +213,8 @@ export function createLiveTheme(client: PluginClientContext): LiveTheme {
     dispose() {
       disposed = true;
       listeners.clear();
+      systemListeners.clear();
+      appearance.remove();
       void observation
         .release()
         .catch((error: unknown) => console.warn("[neon-noir] Could not stop following settings", error));
